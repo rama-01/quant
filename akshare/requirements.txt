@@ -1,0 +1,5 @@
+backtrader==1.9.78.123
+matplotlib==3.10.1
+pandas==2.2.3
+PyQt5==5.15.11
+pytdx==1.72
