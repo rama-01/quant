@@ -2,6 +2,7 @@ import akshare as ak
 import pandas as pd
 from utils.draw import display_dataframe_in_window
 from datetime import datetime, timedelta
+import concurrent.futures
 
 
 # 获取个股资金流排名
@@ -71,25 +72,39 @@ def get_recent_10_days_fund_flow(symbol):
         return pd.DataFrame(columns=["代码", "日期", "主力净流入"])
 
 
+def process_single_stock(symbol):
+    recent_flows = get_recent_10_days_fund_flow(symbol)
+    recent_flows = recent_flows.sort_values("日期", ascending=False)
+
+    if not recent_flows.empty and len(recent_flows) == 10:
+        return {
+            "代码": symbol,
+            **{
+                f"{i+1}日": val
+                for i, val in enumerate(recent_flows["主力净流入"].values)
+            },
+        }
+
+
 def get_merged_fund_flow():
     merged_df = get_recent_fund_flow()
     all_recent_data = []
-    for index, row in merged_df.iterrows():
-        symbol = row["代码"]
-        recent_flows = get_recent_10_days_fund_flow(symbol)
-        recent_flows = recent_flows.sort_values("日期", ascending=False)
 
-        # 转换为横向排列的Series
-        if not recent_flows.empty and len(recent_flows) == 10:
-            flow_dict = {
-                f"{i+1}日": val
-                for i, val in enumerate(recent_flows["主力净流入"].values)
-            }
-            flow_dict["代码"] = symbol
+    # 使用线程池并行处理（核心优化点）
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+        futures = []
+        for index, row in merged_df.iterrows():
+            symbol = row["代码"]
+            # 提交任务到线程池
+            future = executor.submit(process_single_stock, symbol)
+            futures.append(future)
 
-            all_recent_data.append(pd.Series(flow_dict))
+        # 收集结果
+        for future in concurrent.futures.as_completed(futures):
+            result = future.result()
+            if result is not None:
+                all_recent_data.append(result)
 
-    # 合并特征到主表
     if all_recent_data:
         recent_features = pd.DataFrame(all_recent_data)
         merged_df = pd.merge(merged_df, recent_features, on="代码", how="left")
@@ -108,8 +123,8 @@ def filter_merged_df(merged_df):
 
 def test():
     merged_data = get_merged_fund_flow()
-    result = filter_merged_df(merged_data)
-    display_dataframe_in_window(result)
+    # result = filter_merged_df(merged_data)
+    display_dataframe_in_window(merged_data)
 
 
 if __name__ == "__main__":

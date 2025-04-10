@@ -8,9 +8,6 @@ def get_recent_10_days_flow(symbol):
         market = "sh" if symbol.startswith("6") else "sz"
         stock_flow_df = ak.stock_individual_fund_flow(stock=symbol, market=market)
 
-        # if stock_flow_df is None or stock_flow_df.empty:
-        # return pd.DataFrame(columns=["代码", "日期", "主力净流入"])
-
         stock_flow_df = stock_flow_df.sort_values("日期", ascending=True).copy()
         stock_flow_df["日期"] = pd.to_datetime(stock_flow_df["日期"]).dt.date
 
@@ -26,9 +23,8 @@ def get_recent_10_days_flow(symbol):
 
 
 def test():
-    result = get_recent_10_days_flow("600036")
+    result = get_recent_10_days_flow("000592")
     print(result)
-    display_dataframe_in_window(result)
 
 
 if __name__ == "__main__":
