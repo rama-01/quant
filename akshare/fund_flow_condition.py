@@ -111,20 +111,29 @@ def get_merged_fund_flow():
     return merged_df
 
 
-def filter_merged_df(merged_df):
-    filtered_df = merged_df[
-        (merged_df["今日主力净流入"] > 0)
-        & (merged_df["3日主力净流入"] > 0)
-        & (merged_df["5日主力净流入"] > 0)
-        & (merged_df["10日主力净流入"] > 0)
-    ]
-    return filtered_df
-
-
 def test():
     merged_data = get_merged_fund_flow()
-    # result = filter_merged_df(merged_data)
-    display_dataframe_in_window(merged_data)
+    result1 = merged_data[
+        (merged_data["今日主力净流入"] > 0)
+        & (merged_data["3日主力净流入"] > 0)
+        & (merged_data["5日主力净流入"] > 0)
+        & (merged_data["10日主力净流入"] > 0)
+    ]
+    print("近期主力资金净流入", result1)
+    display_dataframe_in_window(result1)
+    result2 = merged_data[
+        (merged_data["1日"] > 0)
+        & (merged_data["2日"] > 0)
+        & (merged_data["3日"] > 0)
+        & (merged_data["4日"] > 0)
+        & (merged_data["5日"] > 0)
+        & (merged_data["6日"] > 0)
+        & (merged_data["7日"] > 0)
+        & (merged_data["8日"] > 0)
+        & (merged_data["9日"] > 0)
+        & (merged_data["10日"] > 0)
+    ]
+    print("近10日主力资金净流入", result2)
 
 
 if __name__ == "__main__":
