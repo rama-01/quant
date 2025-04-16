@@ -4,57 +4,76 @@ import numpy as np
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor
 
+def check_conditions(
+    stock_data,
+    # 时间窗口参数（按自然日设定，自动转换为交易日数量）
+    ma_window=20,                # 均线周期（默认20日）
+    consolidation_lookback=90,   # 横盘观察期（默认3个月）
+    breakout_lookback=60,        # 突破观察期（默认2个月）
+    amplitude_lookback=90,       # 振幅观察期（默认3个月）
+    volume_compare_window=5,     # 成交量对比窗口
+    # 阈值参数
+    bollinger_threshold=0.08,    # 布林带收缩阈值
+    amplitude_threshold=0.3,     # 振幅阈值
+    atr_multiplier=0.5           # ATR突破倍数
+):
+    """
+    改进版选股条件判断，支持动态时间窗口
+    参数说明：
+    - 所有时间类参数按自然日设定，自动转换为实际交易日数量
+    - 阈值参数根据A股历史数据经验值设定
+    """
+    
+    # 计算实际可用的交易日窗口
+    def get_trading_window(days, max_possible=len(stock_data)):
+        # 按自然日转换为交易日（假设平均每月21个交易日）
+        trading_days = min(int(days * 0.7), max_possible)  # 0.7=21/30
+        return max(trading_days, 5)  # 至少保留5个交易日
+    
+    # 动态调整各时间窗口
+    ma_win = get_trading_window(ma_window)
+    con_win = get_trading_window(consolidation_lookback)
+    brk_win = get_trading_window(breakout_lookback)
+    amp_win = get_trading_window(amplitude_lookback)
+    vol_win = get_trading_window(volume_compare_window)
 
-def get_sz_stock_list():
-    sz_stock_list = ak.stock_info_sz_name_code(symbol="A股列表")
-    sz_stock_list = sz_stock_list[["A股代码", "A股简称"]]
-    sz_stock_list.columns = ["symbol", "name"]
-    sz_stock_list = sz_stock_list[~sz_stock_list["symbol"].str.startswith("300")]
-    return sz_stock_list
-
-
-def get_sh_stock_list():
-    sh_stock_list = ak.stock_info_sh_name_code()
-    sh_stock_list = sh_stock_list[["证券代码", "证券简称"]]
-    sh_stock_list.columns = ["symbol", "name"]
-    return sh_stock_list
-
-
-def get_market_value():
-    market_value = ak.stock_zh_a_spot_em()
-    market_value = market_value[["代码", "流通市值"]]
-    market_value.columns = ["symbol", "market_value"]
-    return market_value
-
-
-def filter_stocks_by_market_value(df, market_value):
-    df = pd.merge(df, market_value, on="symbol", how="inner")
-    df = df[df["market_value"] < 5e10]
-    return df
-
-
-def calculate_technical_indicators(stock_data):
-    stock_data["MA20"] = stock_data["收盘"].rolling(window=20).mean()
-    stock_data["Volume_MA5"] = stock_data["成交量"].rolling(window=5).mean()
-    return stock_data
-
-
-def check_conditions(stock_data):
-    low_threshold = stock_data["收盘"].quantile(0.2)
-    is_low = stock_data["收盘"].iloc[-1] < low_threshold
-
-    ma20_volatility = stock_data["MA20"].pct_change(fill_method=None).std()
-    is_consolidating = ma20_volatility < 0.05
-
-    is_volume_increasing = (
-        stock_data["Volume_MA5"].iloc[-1] > stock_data["Volume_MA5"].iloc[-6]
+    # 1. 长期横盘条件（布林带收缩度）
+    stock_data["MA20"] = stock_data["收盘"].rolling(window=ma_win).mean()
+    stock_data["STD20"] = stock_data["收盘"].rolling(window=ma_win).std()
+    bollinger_width = (stock_data["STD20"] / stock_data["MA20"]).iloc[-con_win:].mean()
+    
+    # 2. 成交量条件（动态窗口EMA）
+    stock_data["Volume_EMA5"] = stock_data["成交量"].ewm(span=vol_win).mean()
+    stock_data["Volume_EMA20"] = stock_data["成交量"].ewm(span=vol_win*4).mean()  # 4倍周期对比
+    
+    # 3. 平台突破条件（动态窗口ATR）
+    stock_data["ATR"] = (
+        stock_data["最高"] - stock_data["最低"]
+    ).rolling(window=get_trading_window(14)).mean()
+    
+    # 条件判断
+    is_consolidation = bollinger_width < bollinger_threshold
+    
+    # 成交量温和放大（动态窗口比较）
+    is_volume_growing = (
+        stock_data["Volume_EMA5"].iloc[-vol_win:].mean() 
+        > stock_data["Volume_EMA20"].iloc[-vol_win:].mean()
+    ) & (stock_data["Volume_EMA5"].pct_change().iloc[-vol_win:].mean() > 0)
+    
+    # 平台突破判断（动态窗口高点和ATR）
+    recent_high = stock_data["最高"].iloc[-brk_win:].max()
+    is_breakout = (stock_data["收盘"].iloc[-1] > recent_high) & (
+        stock_data["收盘"].iloc[-1] - recent_high > atr_multiplier * stock_data["ATR"].iloc[-1]
     )
-    is_price_breaking = stock_data["收盘"].iloc[-1] > stock_data["MA20"].iloc[-1]
+    
+    # 振幅条件（动态窗口）
+    recent_low = stock_data["最低"].iloc[-amp_win:].min()
+    amplitude = (recent_high - recent_low) / recent_low
+    is_low_amplitude = amplitude < amplitude_threshold
 
-    return is_low and is_consolidating and is_volume_increasing and is_price_breaking
+    return is_consolidation & is_volume_growing & is_breakout & is_low_amplitude
 
-
-def process_stock(symbol, name, market_value):
+def process_stock(symbol, name):
     try:
         end_date = datetime.now().strftime("%Y%m%d")
         start_date = (datetime.now() - timedelta(days=2000)).strftime("%Y%m%d")
@@ -65,15 +84,10 @@ def process_stock(symbol, name, market_value):
             end_date=end_date,
             adjust="qfq",
         )
-        stock_data = calculate_technical_indicators(stock_data)
         if check_conditions(stock_data):
             return {
-                "symbol": symbol,
-                "name": name,
-                "market_value": market_value,
-                "current_price": stock_data["收盘"].iloc[-1],
-                "MA20": stock_data["MA20"].iloc[-1],
-                "Volume_MA5": stock_data["Volume_MA5"].iloc[-1],
+                "代码": symbol,
+                "名称": name,
             }
     except Exception as e:
         print(f"Error processing {symbol}: {e}")
@@ -81,23 +95,15 @@ def process_stock(symbol, name, market_value):
 
 
 def filter_stocks():
-    sz_stock_list = get_sz_stock_list()
-    sh_stock_list = get_sh_stock_list()
-    stock_list = pd.concat([sz_stock_list, sh_stock_list], ignore_index=True)
-
-    market_value = get_market_value()
-    df = filter_stocks_by_market_value(stock_list, market_value)
-    print(df)
-
-    symbols = df["symbol"].tolist()
-    names = df["name"].tolist()
-    market_values = df["market_value"].tolist()
+    df = ak.stock_zh_a_spot_em()
+    symbols = df["代码"].tolist()
+    names = df["名称"].tolist()
 
     results = []
     with ThreadPoolExecutor(max_workers=10) as executor:
         futures = [
-            executor.submit(process_stock, symbol, name, market_value)
-            for symbol, name, market_value in zip(symbols, names, market_values)
+            executor.submit(process_stock, symbol, name)
+            for symbol, name in zip(symbols, names)
         ]
         for future in futures:
             result = future.result()

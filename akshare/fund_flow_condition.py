@@ -120,7 +120,7 @@ def test():
         & (merged_data["10日主力净流入"] > 0)
     ]
     print("近期主力资金净流入", result1)
-    display_dataframe_in_window(result1)
+    display
     result2 = merged_data[
         (merged_data["1日"] > 0)
         & (merged_data["2日"] > 0)
