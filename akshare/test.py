@@ -1,10 +1,8 @@
 import akshare as ak
 
-stock_zh_a_hist_df = ak.stock_zh_a_hist(
-    symbol="000001",
-    period="daily",
-    start_date="20170301",
-    end_date="20240528",
-    adjust="qfq",
-)
-print(stock_zh_a_hist_df)
+df = ak.stock_zh_a_spot_em()
+# 排除最新价为nan的数据
+df = df.dropna()
+df = df[df["代码"].str.startswith(("60", "00"))]
+
+print(df)
