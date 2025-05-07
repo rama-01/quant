@@ -120,20 +120,10 @@ def test():
         & (merged_data["10日主力净流入"] > 0)
     ]
     print("近期主力资金净流入", result1)
-    display
-    result2 = merged_data[
-        (merged_data["1日"] > 0)
-        & (merged_data["2日"] > 0)
-        & (merged_data["3日"] > 0)
-        & (merged_data["4日"] > 0)
-        & (merged_data["5日"] > 0)
-        & (merged_data["6日"] > 0)
-        & (merged_data["7日"] > 0)
-        & (merged_data["8日"] > 0)
-        & (merged_data["9日"] > 0)
-        & (merged_data["10日"] > 0)
-    ]
-    print("近10日主力资金净流入", result2)
+    display_dataframe_in_window(result1)
+
+    # stock_flow_df = ak.stock_individual_fund_flow(stock=symbol, market=market)
+    # print(stock_flow_df)
 
 
 if __name__ == "__main__":
