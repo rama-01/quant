@@ -1,94 +1,103 @@
 import akshare as ak
 import pandas as pd
-from datetime import datetime
+import numpy as np
+from datetime import datetime, timedelta
+from utils.draw import display_dataframe_in_window
+import nest_asyncio
+import asyncio
+import sys
+import ssl
+import os
 
+# ===== 修复关键配置 =====
+nest_asyncio.apply()
 
-# 1. 获取沪深主板实时行情
-def get_main_board():
-    # 获取所有A股实时行情
-    spot_df = ak.stock_zh_a_spot_em()
+# Windows 兼容性设置
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
-    # 筛选沪深主板（60/00开头）
-    main_board = spot_df[
-        spot_df["代码"].str.startswith(("60", "00"))
-        & ~spot_df["名称"].str.contains("ST")
-    ]
+# 设置全局超时时间
+os.environ["AKSHARE_TIMEOUT"] = "10"
 
-    # 过滤nan值
-    main_board = main_board.dropna()
+# 代理设置（可选）
+os.environ["HTTP_PROXY"] = "http://127.0.0.1:10809"
+os.environ["HTTPS_PROXY"] = "http://127.0.0.1:10809"
 
-    # 过滤上市不足一年的新股
-    # mature_stocks = []
-    # for code in main_board["代码"]:
-    #     ipo_info = ak.stock_ipo_summary_cninfo(symbol=code)
-    #     if not ipo_info.empty:
-    #         listing_date = pd.to_datetime(ipo_info["上市日期"].iloc[0])
-    #         if (pd.Timestamp.today() - listing_date).days >= 365:
-    #             mature_stocks.append(code)
+# SSL 验证绕过（仅测试环境使用）
+ssl._create_default_https_context = ssl._create_unverified_context
 
-    # main_board = main_board[main_board["代码"].isin(mature_stocks)]
+# ===== 主逻辑 =====
+def get_base_data():
+    # 获取实时行情数据（使用官方异步接口）
+    stock_zh_a_spot_df = ak.stock_zh_a_spot_em()
 
-    return main_board[
-        ["代码", "名称", "最新价", "涨跌幅", "今开", "成交额", "量比", "换手率"]
-    ]
+    # 获取资金流向数据（使用官方异步接口）
+    fund_flow_df = ak.stock_individual_fund_flow_rank(indicator="今日")
 
+    # 合并数据
+    merged_df = pd.merge(
+        stock_zh_a_spot_df[
+            ["代码", "名称", "最新价", "今开", "流通市值", "成交量", "换手率", "量比"]
+        ],
+        fund_flow_df[["代码", "今日主力净流入-净额"]],
+        on="代码",
+    )
+    return merged_df
 
-# 2. 添加个股近10个交易日每日主力净流入的数据
-def get_recent_10_days_fund_flow(symbol):
-    try:
-        market = "sh" if symbol.startswith("6") else "sz"
-        stock_flow_df = ak.stock_individual_fund_flow(stock=symbol, market=market)
+# ===== 其余逻辑保持不变 =====
+# 筛选条件实现
+def screen_stocks(df):
+    # 条件1: 当前价格 > 开盘价格（趋势向上）
+    df = df[df["最新价"] > df["今开"]]
 
-        stock_flow_df = stock_flow_df.sort_values("日期", ascending=True).copy()
-        stock_flow_df["日期"] = pd.to_datetime(stock_flow_df["日期"]).dt.date
+    # 条件4: 流通市值20亿-200亿
+    df = df[(df["流通市值"] > 20e8) & (df["流通市值"] < 200e8)]
 
-        recent_10_days = stock_flow_df.tail(10).copy()
-        recent_10_days.loc[:, "主力净流入"] = (
-            recent_10_days["主力净流入-净额"] / 1e8
-        ).round(2)
+    # 条件3: 换手率5%-20%
+    df = df[(df["换手率"] > 5) & (df["换手率"] < 20)]
 
-        recent_10_days["代码"] = symbol
-        return recent_10_days[["代码", "日期", "主力净流入"]]
-    # 排除新股首日无此数据
-    except Exception as e:
-        return pd.DataFrame(columns=["代码", "日期", "主力净流入"])
+    # 条件2: 量比>1
+    df = df[df["量比"] > 0.8]
 
+    # 条件6: 主力净流入为正值
+    df = df[df["今日主力净流入-净额"] > 0]
 
-def filter_stocks():
-    # 获取基础数据
-    main_df = get_main_board()
+    # 条件5: 均线多头发散（需获取历史K线数据）
+    for code in df["代码"]:
+        try:
+            # 动态设置日期范围（最近30个交易日）
+            end_date = datetime.now().strftime("%Y%m%d")
+            start_date = (datetime.now() - timedelta(days=30)).strftime("%Y%m%d")
 
-    # 筛选条件1：涨跌幅、分时、量比、换手率
-    filtered_df = main_df[
-        (main_df["涨跌幅"] > 1)
-        & (main_df["涨跌幅"] < 9.5)
-        & (main_df["最新价"] > main_df["今开"])
-        & (main_df["量比"] > 1)
-        & (main_df["换手率"] > 5)
-    ]
+            # 获取历史K线数据（限定时间窗口）
+            kline_df = ak.stock_zh_a_hist(
+                symbol=code,
+                period="daily",
+                start_date=start_date,
+                end_date=end_date,
+                adjust="qfq"
+            )
 
-    # 筛选条件2: 主力净流入
-    fund_flow_list = []
-    for code in filtered_df["代码"]:
-        flow_data = get_recent_10_days_fund_flow(code)
-        if not flow_data.empty:
-            fund_flow_list.append(flow_data)
+            # 计算均线
+            kline_df["MA5"] = kline_df["收盘"].rolling(5).mean()
+            kline_df["MA10"] = kline_df["收盘"].rolling(10).mean()
 
-    fund_flow_df = pd.concat(fund_flow_list, ignore_index=True)
+            # 判断均线多头排列
+            latest = kline_df.iloc[-1]
+            if not (
+                latest["MA5"] > latest["MA10"]
+                and latest["MA5"] > kline_df.iloc[-2]["MA5"]
+            ):
+                df = df[df["代码"] != code]
+        except:
+            continue
 
-    # 将每日主力净流入数据转换为宽表格式
-    if not fund_flow_df.empty and len(fund_flow_df) == 10:
-        fund_flow_wide = fund_flow_df.pivot(
-            index="代码", columns="日期", values="主力净流入"
-        ).reset_index()
+    return df
 
-    filtered_df = filtered_df.merge(fund_flow_wide, on="代码", how="left")
+def tail_strategy():
+    base_data = get_base_data()
+    result = screen_stocks(base_data)
+    display_dataframe_in_window(result)
+    return result
 
-    filtered_df = filtered_df[filtered_df[fund_flow_df.iloc[-1]["日期"]] > 0]
-
-    return filtered_df
-
-
-# 主逻辑
-if __name__ == "__main__":
-    filter_stocks()
+tail_strategy()

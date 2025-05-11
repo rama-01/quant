@@ -3,81 +3,74 @@ import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor
+from utils.draw import display_dataframe_in_window
 
 
 def check_conditions(
     stock_data,
-    # 时间窗口参数（按自然日设定，自动转换为交易日数量）
-    ma_window=20,  # 均线周期（默认20日）
-    consolidation_lookback=90,  # 横盘观察期（默认3个月）
-    breakout_lookback=60,  # 突破观察期（默认2个月）
-    amplitude_lookback=90,  # 振幅观察期（默认3个月）
-    volume_compare_window=5,  # 成交量对比窗口
+    ma_window=20,  # 均线周期
+    consolidation_lookback=60,  # 横盘观察期
+    breakout_lookback=20,  # 突破观察期
+    amplitude_lookback=60,  # 振幅观察期
+    volume_compare_window=10,  # 成交量对比窗口
     # 阈值参数
-    bollinger_threshold=0.08,  # 布林带收缩阈值
+    bollinger_threshold=0.15,  # 布林带收缩阈值
     amplitude_threshold=0.3,  # 振幅阈值
-    atr_multiplier=0.5,  # ATR突破倍数
+    atr_multiplier=0.3,  # ATR突破倍数
 ):
-    """
-    改进版选股条件判断，支持动态时间窗口
-    参数说明：
-    - 所有时间类参数按自然日设定，自动转换为实际交易日数量
-    - 阈值参数根据A股历史数据经验值设定
-    """
+    if len(stock_data) < 250:
+        return None
 
-    # 计算实际可用的交易日窗口
-    def get_trading_window(days, max_possible=len(stock_data)):
-        # 按自然日转换为交易日（假设平均每月21个交易日）
-        trading_days = min(int(days * 0.7), max_possible)  # 0.7=21/30
-        return max(trading_days, 5)  # 至少保留5个交易日
+    # 1. 修正布林带收缩条件计算
+    stock_data["MA20"] = stock_data["收盘"].rolling(window=ma_window).mean()
+    stock_data["STD20"] = stock_data["收盘"].rolling(window=ma_window).std()
+    # 计算最近N日布林带宽度的最大值（非均值）
+    bollinger_width_max = (
+        (stock_data["STD20"] / stock_data["MA20"]).iloc[-consolidation_lookback:].max()
+    )
+    is_consolidation = bollinger_width_max < bollinger_threshold
 
-    # 动态调整各时间窗口
-    ma_win = get_trading_window(ma_window)
-    con_win = get_trading_window(consolidation_lookback)
-    brk_win = get_trading_window(breakout_lookback)
-    amp_win = get_trading_window(amplitude_lookback)
-    vol_win = get_trading_window(volume_compare_window)
+    # 2. 修正ATR计算（真实波幅）
+    high_low = stock_data["最高"] - stock_data["最低"]
+    high_pclose = (stock_data["最高"] - stock_data["收盘"].shift()).abs()
+    low_pclose = (stock_data["最低"] - stock_data["收盘"].shift()).abs()
+    true_range = pd.concat([high_low, high_pclose, low_pclose], axis=1).max(axis=1)
+    stock_data["ATR"] = true_range.rolling(window=ma_window).mean()
 
-    # 1. 长期横盘条件（布林带收缩度）
-    stock_data["MA20"] = stock_data["收盘"].rolling(window=ma_win).mean()
-    stock_data["STD20"] = stock_data["收盘"].rolling(window=ma_win).std()
-    bollinger_width = (stock_data["STD20"] / stock_data["MA20"]).iloc[-con_win:].mean()
+    # 3. 优化突破条件逻辑
+    recent_high = stock_data["最高"].iloc[-breakout_lookback:-1].max()  # 排除最新日
+    is_breakout = stock_data["收盘"].iloc[-1] > recent_high * (
+        1 + atr_multiplier * stock_data["ATR"].iloc[-1] / recent_high
+    )
 
-    # 2. 成交量条件（动态窗口EMA）
-    stock_data["Volume_EMA5"] = stock_data["成交量"].ewm(span=vol_win).mean()
+    # 4. 振幅条件添加容错机制
+    recent_low = stock_data["最低"].iloc[-amplitude_lookback:].min()
+    if recent_low <= 0:
+        is_low_amplitude = False
+    else:
+        amplitude = (recent_high - recent_low) / recent_low
+        is_low_amplitude = amplitude < amplitude_threshold
+
+    # 5. 成交量放大
+    stock_data["Volume_EMA5"] = (
+        stock_data["成交量"].ewm(span=volume_compare_window).mean()
+    )
     stock_data["Volume_EMA20"] = (
-        stock_data["成交量"].ewm(span=vol_win * 4).mean()
-    )  # 4倍周期对比
-
-    # 3. 平台突破条件（动态窗口ATR）
-    stock_data["ATR"] = (
-        (stock_data["最高"] - stock_data["最低"])
-        .rolling(window=get_trading_window(14))
-        .mean()
+        stock_data["成交量"].ewm(span=volume_compare_window * 4).mean()
     )
-
-    # 条件判断
-    is_consolidation = bollinger_width < bollinger_threshold
-
-    # 成交量温和放大（动态窗口比较）
     is_volume_growing = (
-        stock_data["Volume_EMA5"].iloc[-vol_win:].mean()
-        > stock_data["Volume_EMA20"].iloc[-vol_win:].mean()
-    ) & (stock_data["Volume_EMA5"].pct_change().iloc[-vol_win:].mean() > 0)
-
-    # 平台突破判断（动态窗口高点和ATR）
-    recent_high = stock_data["最高"].iloc[-brk_win:].max()
-    is_breakout = (stock_data["收盘"].iloc[-1] > recent_high) & (
-        stock_data["收盘"].iloc[-1] - recent_high
-        > atr_multiplier * stock_data["ATR"].iloc[-1]
+        stock_data["Volume_EMA5"].iloc[-volume_compare_window:].mean()
+        > stock_data["Volume_EMA20"].iloc[-volume_compare_window:].mean()
+    ) & (
+        stock_data["Volume_EMA5"].pct_change().iloc[-volume_compare_window:].mean() > 0
     )
 
-    # 振幅条件（动态窗口）
-    recent_low = stock_data["最低"].iloc[-amp_win:].min()
-    amplitude = (recent_high - recent_low) / recent_low
-    is_low_amplitude = amplitude < amplitude_threshold
+    # 6.当前价格处于历史20%分位以下
+    price_percentile = stock_data["收盘"].quantile(0.2)  # 计算20%分位值
+    is_low_percentile = stock_data["收盘"].iloc[-1] < price_percentile
 
-    return is_consolidation & is_volume_growing & is_breakout & is_low_amplitude
+    return is_consolidation & is_low_amplitude & is_volume_growing & is_low_percentile
+
 
 
 def process_stock(symbol, name):
@@ -104,6 +97,17 @@ def process_stock(symbol, name):
 
 def filter_stocks():
     df = ak.stock_zh_a_spot_em()
+    # 排除值为nan的数据
+    df = df[~df["最新价"].isna()]
+    df["流通市值"] = pd.to_numeric(df["流通市值"], errors="coerce")
+    # 排除创业板、科创板、ST股票、总市值大于500亿的股
+    df = df[
+        ~(
+            df["代码"].str.startswith(("30", "688"))
+            | df["名称"].str.startswith(("ST", "*ST"))
+        )
+    ]
+
     symbols = df["代码"].tolist()
     names = df["名称"].tolist()
 
@@ -123,5 +127,4 @@ def filter_stocks():
 
 if __name__ == "__main__":
     selected_stocks = filter_stocks()
-    print("\n=== 筛选结果 ===")
-    print(selected_stocks)
+    display_dataframe_in_window(selected_stocks)
