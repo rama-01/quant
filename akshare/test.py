@@ -1,4 +1,4 @@
 import akshare as ak
 
-stock_cyq_em_df = ak.stock_cyq_em(symbol="000581", adjust="qfq")
-print(stock_cyq_em_df)
+stock_zh_a_spot_em_df = ak.stock_zh_a_spot_em()
+print(stock_zh_a_spot_em_df)

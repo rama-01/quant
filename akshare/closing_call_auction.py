@@ -60,7 +60,7 @@ def get_base_data():
     fund_flow_3d["3日净流入"] = fund_flow_3d["3日净流入"].astype(float) / 1e8
     fund_flow_10d["10日净流入"] = fund_flow_10d["10日净流入"].astype(float) / 1e8
 
-    # 合并数据（保留今日资金流向字段）
+    # 合并数据
     merged_df = pd.merge(
         stock_zh_a_spot_df[
             [
@@ -74,6 +74,8 @@ def get_base_data():
                 "成交额",
                 "流通市值",
                 "总市值",
+                "60日涨跌幅",
+                "年初至今涨跌幅",
             ]
         ],
         fund_flow_today[["代码", "今日净流入"]],
@@ -100,13 +102,13 @@ def screen_stocks(df):
     df = df[df["最新价"] >= df["今开"]]
 
     # 条件4: 流通市值20亿-500亿
-    df = df[(df["流通市值"] > 20) & (df["流通市值"] < 500)]
+    df = df[(df["流通市值"] > 20) & (df["流通市值"] < 200)]
 
     # 条件3: 换手率3%-20%
     df = df[(df["换手率"] > 3) & (df["换手率"] < 20)]
 
     # 条件2: 量比>0.8
-    df = df[df["量比"] > 0.8]
+    df = df[df["量比"] > 1]
 
     # 条件6: 主力净流入为正值/10日净流入为正值
     df = df[df["今日净流入"] > 0]
@@ -134,16 +136,19 @@ def screen_stocks(df):
 
             # 判断均线多头排列
             latest = kline_df.iloc[-1]
+            prev_day = kline_df.iloc[-2]
+
             if not (
                 latest["MA5"] > latest["MA10"]
-                and latest["MA5"] > kline_df.iloc[-2]["MA5"]
+                and latest["MA5"] > prev_day["MA5"]
+                # and latest["MA5"] - prev_day["MA5"] >= 0.3
             ):
                 df = df[df["代码"] != code]
         except:
             continue
 
     # 条件7: 剔除涨停的股票
-    df = df[df["涨跌幅"] < 9.8]
+    df = df[(df["涨跌幅"] < 8) & (df["涨跌幅"] >= 0)]
 
     # 条件8: 筹码分布：收盘获利>70%
     cyq_records = []
@@ -155,17 +160,23 @@ def screen_stocks(df):
             cyq_df = ak.stock_cyq_em(symbol=code, adjust="qfq")
 
             if not cyq_df.empty:
-                latest_row = cyq_df.iloc[-1]  
+                latest_row = cyq_df.iloc[-1]
                 profit_ratio = latest_row["获利比例"]
-                concentration = latest_row["90集中度"]
+                concentration_90 = latest_row["90集中度"]
+                concentration_70 = latest_row["70集中度"]
 
-                # 条件过滤并记录有效数据
-                if profit_ratio >= 0.5:
+                # 获利比例>=70%,90集中度<=0.08,70集中度<=0.10
+                if (
+                    profit_ratio >= 0.9
+                    and concentration_70 <= 0.1
+                    and concentration_90 <= 0.15
+                ):
                     cyq_records.append(
                         {
                             "代码": code,
                             "获利比例": profit_ratio,
-                            "90集中度": concentration,
+                            "90集中度": concentration_90,
+                            "70集中度": concentration_70,
                         }
                     )
                 else:
@@ -180,7 +191,9 @@ def screen_stocks(df):
         cyq_df = pd.DataFrame(cyq_records)
         df = pd.merge(df, cyq_df, on="代码", how="left")
         # 强制类型转换确保后续计算正确
-        df[["获利比例", "90集中度"]] = df[["获利比例", "90集中度"]].astype(float)
+        df[["获利比例", "90集中度", "70集中度"]] = df[
+            ["获利比例", "90集中度", "70集中度"]
+        ].astype(float)
 
     # 条件9：计算3天、5天、10天涨幅
 
